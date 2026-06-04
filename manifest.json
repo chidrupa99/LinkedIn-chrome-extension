@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "LinkedIn Repost Original Date",
-  "version": "0.2.0",
-  "description": "When a LinkedIn job card says \"Reposted\", show the original posted date next to it.",
+  "name": "LinkedIn Job Filter",
+  "version": "1.0.0",
+  "description": "Reveals real posting dates on reposted jobs, auto-dismisses companies you don't want to see, and flags duplicate listings you've already canceled elsewhere.",
   "permissions": ["storage"],
   "host_permissions": ["https://www.linkedin.com/*"],
   "content_scripts": [
