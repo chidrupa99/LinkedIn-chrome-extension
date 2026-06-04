@@ -1,0 +1,145 @@
+/* "X after filters" counter appended next to LinkedIn's "N results" text */
+.ljf-results-count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  font-size: 0.85em;
+  font-weight: 500;
+  color: inherit;
+  opacity: 0.95;
+  vertical-align: baseline;
+}
+
+/* Auto-dismissed cards (DataAnnotation, Dice) — hidden entirely */
+.ljf-auto-hidden {
+  display: none !important;
+}
+
+/* Safety net: never let the right-side detail panel get auto-hidden,
+   even if the brute-force scan misidentifies it as a card-like ancestor. */
+.jobs-details.ljf-auto-hidden,
+.jobs-search__job-details.ljf-auto-hidden,
+.jobs-unified-top-card.ljf-auto-hidden,
+.job-view-layout.ljf-auto-hidden,
+.job-details-jobs-unified-top-card__container--two-pane.ljf-auto-hidden,
+.scaffold-layout__detail .ljf-auto-hidden {
+  display: block !important;
+}
+
+/* When LinkedIn marks a card as dismissed, it applies its own muted styling
+   to the card's text/logo. Match that visual treatment on OUR banner and
+   meta panel so they fade together with the card instead of standing out
+   at full opacity below a faded card. */
+.job-card-list--is-dismissed ~ .ljf-engaged-banner,
+.job-card-list--is-dismissed ~ .ljf-card-meta {
+  opacity: 0.5;
+  transition: opacity 0.18s ease;
+}
+.job-card-list--is-dismissed:hover ~ .ljf-engaged-banner,
+.job-card-list--is-dismissed:hover ~ .ljf-card-meta {
+  opacity: 1;
+}
+
+/* Inline annotation for "Reposted ..." text (in the detail panel) */
+.ljf-orig-date {
+  color: #666;
+  font-size: 0.92em;
+  margin-left: 4px;
+  font-weight: normal;
+}
+
+/* Prominent dismissal banner (separate from the pill panel) */
+.ljf-engaged-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #fff4e5;
+  color: #8a4b00;
+  border-left: 3px solid #d48806;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 4px 0;
+  border-radius: 3px;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  line-height: 1.3;
+  box-sizing: border-box;
+  width: 100%;
+  flex-basis: 100%;
+}
+.ljf-banner-card {
+  align-self: stretch;
+  grid-column: 1 / -1;
+}
+.ljf-engaged-banner-clear {
+  background: transparent;
+  border: none;
+  color: #8a4b00;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0 4px;
+  margin-left: 8px;
+  line-height: 1;
+}
+.ljf-engaged-banner-clear:hover { color: #5a3000; }
+
+/* ---------- Per-card meta panel: bubble of pill tags below each card ----- */
+.ljf-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px;
+  /* Inset from column edges. No explicit width — letting natural block /
+     flex stretching fit the available space minus the horizontal margin. */
+  margin: 4px 12px 10px 12px;
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  box-sizing: border-box;
+  align-self: stretch;
+  grid-column: 1 / -1;
+  max-width: calc(100% - 24px);
+  overflow: hidden;
+}
+
+/* Distinct background when the user has already canceled this same role
+   at another location — this is the "you've been here before" signal. */
+.ljf-card-meta-cancelled {
+  background: #ffe4e4;
+  border-left: 3px solid #c62828;
+}
+.ljf-card-meta-loc {
+  background: rgba(255, 184, 0, 0.10);
+}
+.ljf-card-meta-exact {
+  background: rgba(255, 122, 0, 0.10);
+  border-left: 3px solid #ff8f00;
+}
+
+/* Pills — small inline chips inside the meta panel. Allow wrapping so
+   long pills (e.g. "You canceled this for 7 other locations: ...") don't
+   get clipped at the column edge. */
+.ljf-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: normal;
+  word-break: break-word;
+  max-width: 100%;
+  font-family: inherit;
+}
+
+.ljf-pill-date          { background: rgba(58, 84, 119, 0.10); color: #1d3557; }
+.ljf-pill-repost        { background: #fff4e5; color: #8a4b00; font-weight: 600; }
+.ljf-pill-viewed        { background: rgba(106, 27, 154, 0.10); color: #6a1b9a; }
+.ljf-pill-applied       { background: rgba(46, 125, 50, 0.12); color: #2e7d32; font-weight: 600; }
+.ljf-pill-dup-cancelled { background: #ffcdd2; color: #b71c1c; font-weight: 700; }
+.ljf-pill-dup-loc       { background: #fff3c4; color: #b26500; }
+.ljf-pill-dup-exact     { background: #ffe0b2; color: #bf360c; font-weight: 600; }
