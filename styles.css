@@ -138,6 +138,7 @@
 
 .ljf-pill-date          { background: rgba(58, 84, 119, 0.10); color: #1d3557; }
 .ljf-pill-repost        { background: #fff4e5; color: #8a4b00; font-weight: 600; }
+.ljf-pill-applicants    { background: rgba(14, 81, 129, 0.10); color: #0e5181; }
 .ljf-pill-viewed        { background: rgba(106, 27, 154, 0.10); color: #6a1b9a; }
 .ljf-pill-applied       { background: rgba(46, 125, 50, 0.12); color: #2e7d32; font-weight: 600; }
 .ljf-pill-dup-cancelled { background: #ffcdd2; color: #b71c1c; font-weight: 700; }

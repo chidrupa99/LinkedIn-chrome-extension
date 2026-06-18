@@ -819,9 +819,15 @@
       if (!res.ok) { warn('voyager HTTP', res.status, 'for', jobId); return null; }
       const data = await res.json();
 
-      // Walk the response for listedAt / originalListedAt fields
+      // Walk the response for the fields we care about.
+      // - originalListedAt / listedAt: posting timestamps
+      // - applies:                     applicant count (LinkedIn caps at 100+
+      //   on the UI but Voyager often returns the actual number)
+      // - views:                       impression count (less useful, but cheap to grab)
       let originalListedAt = null;
       let listedAt = null;
+      let applies = null;
+      let views = null;
       (function walk(node) {
         if (!node || typeof node !== 'object') return;
         if (Array.isArray(node)) { node.forEach(walk); return; }
@@ -831,14 +837,22 @@
         if (typeof node.listedAt === 'number' && !listedAt) {
           listedAt = node.listedAt;
         }
+        if (typeof node.applies === 'number' && applies === null) {
+          applies = node.applies;
+        }
+        if (typeof node.views === 'number' && views === null) {
+          views = node.views;
+        }
         for (const k of Object.keys(node)) walk(node[k]);
       })(data);
 
       const ts = originalListedAt || listedAt;
-      log('voyager', jobId, { originalListedAt, listedAt });
+      log('voyager', jobId, { originalListedAt, listedAt, applies, views });
       return {
         originalListedAt,
         listedAt,
+        applies,
+        views,
         datePosted: ts ? new Date(ts).toISOString() : null,
       };
     } catch (e) {
@@ -1058,6 +1072,16 @@
           type: repost ? 'repost' : 'date',
           text: repost ? `↻ Repost · original ${formatDate(iso)}` : `📅 ${formatDate(iso)}`,
         });
+      }
+
+      // Applicant-count pill (from Voyager's `applies` field).
+      if (typeof info.applies === 'number' && info.applies > 0) {
+        const n = info.applies;
+        let label;
+        if (n === 1) label = '1 applicant';
+        else if (n >= 100) label = '100+ applicants';
+        else label = `${n} applicants`;
+        pills.push({ type: 'applicants', text: `👥 ${label}` });
       }
     }
 
