@@ -23,6 +23,10 @@
   log('content script loaded', location.href);
 
   const CACHE_TTL_MS = 1000 * 60 * 60 * 24; // 24h
+  // Bump whenever the cached `jd:<jobId>` record shape changes. Old entries
+  // (without this version, or with a lower one) get treated as a cache miss
+  // and re-fetched from Voyager. v2: added `applies` / `views` fields.
+  const CACHE_VERSION = 2;
   const ANNOTATION_CLASS = 'ljf-orig-date';
 
   const memCache = new Map();
@@ -785,15 +789,24 @@
 
   // ---------- Cache ----------
   async function cacheGet(jobId) {
-    if (memCache.has(jobId)) return memCache.get(jobId);
+    if (memCache.has(jobId)) {
+      const m = memCache.get(jobId);
+      if (m && m.version === CACHE_VERSION) return m;
+      memCache.delete(jobId); // stale shape; force re-fetch
+    }
     const key = `jd:${jobId}`;
     const out = await safeStorageGet([key]);
     const v = out[key] || null;
-    if (v) memCache.set(jobId, v);
+    if (!v) return null;
+    if (v.version !== CACHE_VERSION) {
+      log('cache miss (stale schema):', jobId, 'had version', v.version);
+      return null; // outdated shape — let getJobInfo re-fetch
+    }
+    memCache.set(jobId, v);
     return v;
   }
   function cacheSet(jobId, value) {
-    const stored = { ...value, cachedAt: Date.now() };
+    const stored = { ...value, version: CACHE_VERSION, cachedAt: Date.now() };
     memCache.set(jobId, stored);
     safeStorageSet({ [`jd:${jobId}`]: stored });
     return stored;
@@ -820,14 +833,15 @@
       const data = await res.json();
 
       // Walk the response for the fields we care about.
-      // - originalListedAt / listedAt: posting timestamps
-      // - applies:                     applicant count (LinkedIn caps at 100+
-      //   on the UI but Voyager often returns the actual number)
-      // - views:                       impression count (less useful, but cheap to grab)
+      //  - originalListedAt / listedAt: posting timestamps
+      //  - applies / numberOfApplicants / applicantCount: applicant count
+      //    (different shapes appear in different decorations)
+      //  - views:                       impression count (less useful but cheap)
       let originalListedAt = null;
       let listedAt = null;
       let applies = null;
       let views = null;
+      const APPLY_KEYS = ['applies', 'numberOfApplicants', 'applicantCount', 'numApplies'];
       (function walk(node) {
         if (!node || typeof node !== 'object') return;
         if (Array.isArray(node)) { node.forEach(walk); return; }
@@ -837,8 +851,10 @@
         if (typeof node.listedAt === 'number' && !listedAt) {
           listedAt = node.listedAt;
         }
-        if (typeof node.applies === 'number' && applies === null) {
-          applies = node.applies;
+        for (const k of APPLY_KEYS) {
+          if (typeof node[k] === 'number' && (applies === null || node[k] > applies)) {
+            applies = node[k];
+          }
         }
         if (typeof node.views === 'number' && views === null) {
           views = node.views;
