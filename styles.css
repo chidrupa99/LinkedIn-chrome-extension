@@ -11,6 +11,15 @@
   opacity: 0.95;
   vertical-align: baseline;
 }
+/* Sort-prefetch in progress — pulse to signal "working" */
+.ljf-results-count-loading {
+  background: rgba(10, 102, 194, 0.15);
+  animation: ljf-pulse 1.2s ease-in-out infinite;
+}
+@keyframes ljf-pulse {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 1;   }
+}
 
 /* Auto-dismissed cards (DataAnnotation, Dice) — hidden entirely */
 .ljf-auto-hidden {
@@ -67,7 +76,11 @@
   line-height: 1.3;
   box-sizing: border-box;
   width: 100%;
-  flex-basis: 100%;
+  /* The AI-powered search list is `flex-direction:column`, so any flex-basis
+     > 0 gets read as main-axis (vertical) length — the previous
+     `flex-basis: 100%` was stretching the banner to the full list height.
+     `flex: none` = `0 0 auto` → content-based height, no shrink, no grow. */
+  flex: none;
 }
 .ljf-banner-card {
   align-self: stretch;
@@ -103,6 +116,11 @@
   grid-column: 1 / -1;
   max-width: calc(100% - 24px);
   overflow: hidden;
+  /* The AI-powered search list is `flex-direction:column, flex-wrap:nowrap`,
+     which combined with our `overflow:hidden` lets the flex algorithm shrink
+     the panel down to ~12px, clipping every pill. Opt out of the shrink so
+     the panel keeps its natural content height. */
+  flex-shrink: 0;
 }
 
 /* Distinct background when the user has already canceled this same role
@@ -136,6 +154,7 @@
   font-family: inherit;
 }
 
+.ljf-pill-stale         { background: #ffe0e0; color: #b71c1c; font-weight: 700; }
 .ljf-pill-date          { background: rgba(58, 84, 119, 0.10); color: #1d3557; }
 .ljf-pill-repost        { background: #fff4e5; color: #8a4b00; font-weight: 600; }
 .ljf-pill-applicants    { background: rgba(14, 81, 129, 0.10); color: #0e5181; }

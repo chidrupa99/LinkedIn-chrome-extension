@@ -28,6 +28,10 @@
   // and re-fetched from Voyager. v2: added `applies` / `views` fields.
   const CACHE_VERSION = 2;
   const ANNOTATION_CLASS = 'ljf-orig-date';
+  // Calendar-day age at which a job is flagged with a "Skip" pill. Uses the
+  // ORIGINAL posting timestamp (originalListedAt) so a fresh repost of a
+  // months-old listing still trips the pill.
+  const STALE_DAYS_THRESHOLD = 30;
 
   const memCache = new Map();
   const inflight = new Map();
@@ -130,6 +134,22 @@
     );
   }
 
+  // Walk up from a card element to the outermost ancestor that is a direct
+  // child of the list root. On the classic layout the card IS the direct
+  // child, so this returns the card unchanged. On the AI-powered "beta"
+  // layout each card sits inside one or more `display: contents` wrappers,
+  // and the outermost wrapper is the actual list row — that's where sibling
+  // banners/panels need to attach for the layout to include them.
+  function getCardOuter(card) {
+    const root = findListRoot();
+    if (!root || !root.contains(card)) return card;
+    let outer = card;
+    while (outer.parentElement && outer.parentElement !== root) {
+      outer = outer.parentElement;
+    }
+    return outer;
+  }
+
   function extractJobIdFromContainer(el) {
     if (!el) return null;
     for (const attr of ['data-job-id', 'data-occludable-job-id']) {
@@ -144,6 +164,17 @@
     const link = el.querySelector && el.querySelector('a[href*="/jobs/view/"]');
     if (link) {
       const m = link.getAttribute('href').match(/\/jobs\/view\/(\d+)/);
+      if (m) return m[1];
+    }
+    // AI-powered search: the numeric jobId is embedded in a componentkey
+    // attribute on the card itself (e.g. "job-card-component-ref-4443025780").
+    // This is the real jobId — hitting it means Voyager can fetch the posted
+    // date, applicant count, and original-repost timestamps just like the
+    // classic layout.
+    const compKey = (el.getAttribute && el.getAttribute('componentkey'))
+      || el.querySelector?.('[componentkey^="job-card-component-ref-"]')?.getAttribute('componentkey');
+    if (compKey) {
+      const m = compKey.match(/job-card-component-ref-(\d+)/);
       if (m) return m[1];
     }
     // Beta search fallback: hashed classes, no data-job-id, no /jobs/view/ link.
@@ -182,21 +213,40 @@
 
   // Record an engagement event. Supports multiple event types per job —
   // each call updates the corresponding `<type>At` timestamp without
-  // clobbering the others. Known types: 'viewed' | 'applied' | 'dismissed'.
-  async function recordEngaged(jobId, type, meta) {
+  // clobbering the others. Known types: 'viewed' | 'applied' | 'dismissed'
+  // | 'autoHidden'. `extras` is an optional bag of scalars merged into the
+  // stored record (e.g. { autoHiddenRule: 'DataAnnotation' }).
+  //
+  // Each call also fires postEngagement — the outbound sheet sync — so the
+  // sheet ends up with one row per engagement moment (a view of the same
+  // job three times = three rows), which is what makes it useful as an
+  // input to future "make the extension smarter" heuristics.
+  async function recordEngaged(jobId, type, meta, extras) {
     if (!jobId || !type) return;
     const out = await safeStorageGet([ENGAGED_KEY(jobId)]);
     const existing = out[ENGAGED_KEY(jobId)] || {};
+    const now = Date.now();
     const updated = {
       ...existing,
       title:    (meta && meta.title)    || existing.title,
       company:  (meta && meta.company)  || existing.company,
       location: (meta && meta.location) || existing.location,
-      [`${type}At`]: Date.now(),
+      [`${type}At`]: now,
+      ...(extras || {}),
     };
     engagedCache.set(jobId, updated);
     safeStorageSet({ [ENGAGED_KEY(jobId)]: updated });
     log('recorded', type, 'for', jobId);
+    postEngagement({
+      timestamp: new Date(now).toISOString(),
+      action: type,
+      jobId,
+      title: updated.title || '',
+      company: updated.company || '',
+      location: updated.location || '',
+      url: location.href,
+      ...(extras || {}),
+    });
   }
 
   function clearEngaged(jobId) {
@@ -379,12 +429,41 @@
 
   const STORAGE_AUTO_DISMISS = 'autodismiss_rules';
   const STORAGE_FILTER_SETTINGS = 'filter_settings';
+  const STORAGE_SHEETS_SYNC = 'sheets_sync';
+
+  // Google Sheets sync — writes each engagement event to a user-supplied
+  // Apps Script web-app URL. Empty webhookUrl / enabled=false is a no-op.
+  let SHEETS_SYNC = { enabled: false, webhookUrl: '' };
+
+  async function loadSheetsSync() {
+    const out = await safeStorageGet([STORAGE_SHEETS_SYNC]);
+    SHEETS_SYNC = { ...SHEETS_SYNC, ...(out[STORAGE_SHEETS_SYNC] || {}) };
+  }
+
+  // Fire-and-forget POST to the Apps Script webhook. Uses `mode: 'no-cors'`
+  // and JSON body — Apps Script's doPost reads e.postData.contents. Errors
+  // are swallowed on purpose: sync must never break job browsing.
+  function postEngagement(event) {
+    if (!SHEETS_SYNC.enabled || !SHEETS_SYNC.webhookUrl) return;
+    try {
+      fetch(SHEETS_SYNC.webhookUrl, {
+        method: 'POST',
+        // 'text/plain' avoids a CORS preflight (Apps Script doesn't
+        // implement OPTIONS), so the request goes through directly.
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(event),
+        // credentials omitted — we don't want to attach LinkedIn cookies
+        credentials: 'omit',
+      }).catch(() => { /* fire-and-forget */ });
+    } catch (_) { /* fire-and-forget */ }
+  }
 
   // Live filter settings (toggled from the popup). Apply to cards based on
   // their duplicate-detection panelVariant.
   let FILTER_SETTINGS = {
-    hideDupCancelled: false,
-    hideDupLoc:       false,
+    hideDupCancelled:  false,
+    hideDupLoc:        false,
+    sortByListedDate:  false,
   };
 
   async function loadFilterSettings() {
@@ -402,6 +481,8 @@
   // each card gets re-evaluated from scratch under the new rules/filters.
   function reapplyAllFilters() {
     return Promise.all([loadAutoDismissRules(), loadFilterSettings()]).then(() => {
+      // Un-hide both the card and its outer wrapper — applyAutoDismiss may
+      // have marked either or both, depending on layout.
       document.querySelectorAll('.ljf-auto-hidden').forEach((el) => {
         el.classList.remove('ljf-auto-hidden');
         el.removeAttribute('data-ljf-auto-rule');
@@ -409,6 +490,7 @@
       });
       document.querySelectorAll('[data-ljf-card-observed]').forEach((el) => {
         delete el.dataset.ljfCardObserved;
+        delete el.dataset.ljfAutoDismissed;
       });
       document.querySelectorAll('.' + META_CLASS).forEach((el) => el.remove());
       scheduleScan();
@@ -417,6 +499,9 @@
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
+    // Sheets-sync settings change independently of the filter pipeline —
+    // just refresh the in-memory copy, no re-scan needed.
+    if (changes[STORAGE_SHEETS_SYNC]) loadSheetsSync();
     if (!changes[STORAGE_AUTO_DISMISS] && !changes[STORAGE_FILTER_SETTINGS]) return;
     reapplyAllFilters();
   });
@@ -570,17 +655,27 @@
 
     // Last-resort fallback: line-based parsing of the card's text content.
     // LinkedIn cards typically render as: Title \n Company \n Location \n ...
+    // On the beta layout the title is emitted twice (visible link + accessible
+    // label), and may carry a "(Verified job)" suffix on one copy — collapse
+    // adjacent duplicates and normalize before slotting into fields.
     if (!company || !title) {
-      const lines = (el.innerText || '')
+      const stripSuffix = (s) => s.replace(/\s*\((?:Verified job|Promoted|Reposted)\)\s*$/i, '').trim();
+      const raw = (el.innerText || '')
         .split('\n')
-        .map((l) => l.trim())
+        .map((l) => stripSuffix(l.trim()))
         .filter((l) => l && !/^(viewed|easy apply|promoted|be an early applicant|in your network|new|posted .+ ago|\d+\s+(connection|connections)\s+work\s+here|actively reviewing applicants|\d+\s+hours?\s+ago|\d+\s+days?\s+ago|\d+\s+weeks?\s+ago|reposted .+ ago|·)$/i.test(l));
+      const lines = [];
+      for (const l of raw) {
+        if (lines.length && lines[lines.length - 1].toLowerCase() === l.toLowerCase()) continue;
+        lines.push(l);
+      }
       if (!title    && lines[0]) title    = lines[0];
       if (!company  && lines[1]) company  = lines[1];
       if (!location && lines[2]) location = lines[2];
     }
 
-    // Strip trailing junk like " · 2,345 followers"
+    // Strip trailing junk like " · 2,345 followers" and "(Verified job)"
+    title = title.replace(/\s*\((?:Verified job|Promoted|Reposted)\)\s*$/i, '').trim();
     company = company.split(/\s+·\s+|\n/)[0].trim();
 
     return { title, company, location };
@@ -646,7 +741,8 @@
     clearBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
-      clearEngaged(jobId);
+      // Only clear the dismissed marker — preserve viewed / applied history.
+      clearEngagedType(jobId, 'dismissed');
       banner.remove();
     });
     banner.appendChild(clearBtn);
@@ -666,13 +762,17 @@
     const key = `${jobId}:${isDetail ? 'detail' : 'card'}`;
     const selector = `.${BANNER_CLASS}[data-ljf-key="${CSS.escape(key)}"]`;
     const existing = document.querySelector(selector);
-    const expectedParent = isDetail ? container : container.parentElement;
+    // For list cards on the beta layout the card is wrapped in one or more
+    // display:contents divs. Anchor sibling insertion to the outermost
+    // wrapper so the banner participates in the list's grid layout.
+    const anchor = isDetail ? container : getCardOuter(container);
+    const expectedParent = isDetail ? container : anchor.parentElement;
     if (!expectedParent) return;
 
     if (existing) {
       const inRightPlace = isDetail
         ? existing.parentElement === expectedParent && existing === expectedParent.firstChild
-        : existing.parentElement === expectedParent && existing.previousElementSibling === container;
+        : existing.parentElement === expectedParent && existing.previousElementSibling === anchor;
       if (inRightPlace) return;
       existing.remove();
     }
@@ -690,7 +790,7 @@
     if (isDetail) {
       expectedParent.insertBefore(banner, expectedParent.firstChild);
     } else {
-      expectedParent.insertBefore(banner, container.nextSibling);
+      expectedParent.insertBefore(banner, anchor.nextSibling);
     }
   }
 
@@ -752,7 +852,10 @@
     cleanupCardDateAnnotations();
   }
 
-  // Delegated click listener for dismiss / undo buttons
+  // Delegated click listener for dismiss / undo / apply buttons.
+  // We only OBSERVE clicks — LinkedIn's own handler runs unchanged, so its
+  // native "grey overlay + Undo" state on dismiss is what the user sees.
+  // Our job is just to record engagement so pills and dedup history work.
   document.addEventListener('click', (e) => {
     const btn = e.target && e.target.closest && e.target.closest('button');
     if (!btn) return;
@@ -940,6 +1043,11 @@
     while (el && el !== document.body) {
       const id = el.getAttribute && el.getAttribute('data-job-id');
       if (id && /^\d+$/.test(id)) return id;
+      const compKey = el.getAttribute && el.getAttribute('componentkey');
+      if (compKey) {
+        const cm = compKey.match(/job-card-component-ref-(\d+)/);
+        if (cm) return cm[1];
+      }
       const link = el.querySelector && el.querySelector('a[href*="/jobs/view/"]');
       if (link) {
         const m = link.getAttribute('href').match(/\/jobs\/view\/(\d+)/);
@@ -1078,16 +1186,24 @@
 
     const pills = [];
 
-    // Date pill (always, if we have a date)
+    // Date pill (always, if we have a date). When the original posting is
+    // 30+ calendar days old we fold the "Skip" verdict INTO the date/repost
+    // pill instead of emitting a separate pill — otherwise the age would
+    // show twice ("Skip · 151 Days ago" + "Repost · original 151 Days ago").
     if (info) {
       const ts = info.originalListedAt || info.listedAt;
       const iso = ts ? new Date(ts).toISOString() : info.datePosted;
       if (iso) {
+        const daysOld = calendarDaysAgo(new Date(iso).getTime());
         const repost = isRepost(info);
-        pills.push({
-          type: repost ? 'repost' : 'date',
-          text: repost ? `↻ Repost · original ${formatDate(iso)}` : `📅 ${formatDate(iso)}`,
-        });
+        const stale = daysOld >= STALE_DAYS_THRESHOLD;
+        const dateStr = formatDate(iso);
+        let text, type;
+        if (stale && repost)      { type = 'stale'; text = `⏭ Skip · Repost from ${dateStr}`; }
+        else if (stale)           { type = 'stale'; text = `⏭ Skip · Posted ${dateStr}`; }
+        else if (repost)          { type = 'repost'; text = `↻ Repost · original ${dateStr}`; }
+        else                      { type = 'date';   text = `📅 ${dateStr}`; }
+        pills.push({ type, text });
       }
 
       // Applicant-count pill (from Voyager's `applies` field).
@@ -1149,9 +1265,10 @@
           });
           panelVariant = 'loc';
         } else {
+          const n = siblings.length;
           pills.push({
             type: 'dup-exact',
-            text: `🔁 Duplicate (${siblings.length} more)`,
+            text: `🔁 +${n} duplicate${n === 1 ? '' : 's'}`,
           });
           panelVariant = 'exact';
         }
@@ -1189,6 +1306,16 @@
     if (card.classList.contains('job-card-list--is-dismissed')) return; // already dismissed
     if (card.dataset.ljfAutoDismissed) return; // we've already clicked once
 
+    // Fire an 'autoHidden' engagement event exactly once per job (per
+    // extension install) — checked against engagedCache so page reloads
+    // don't produce duplicate sheet rows. We record BEFORE the click so
+    // we capture the metadata while the card is still fully rendered.
+    const jobId = extractJobIdFromContainer(card);
+    if (jobId && !engagedCache.get(jobId)?.autoHiddenAt) {
+      const meta = extractCardMeta(card);
+      recordEngaged(jobId, 'autoHidden', meta, { autoHiddenRule: label || '' });
+    }
+
     const dismissBtn = card.querySelector(
       'button[aria-label*="dismiss" i]:not([aria-label*="undo" i]):not([aria-label*="restore" i])'
     );
@@ -1198,9 +1325,17 @@
       dismissBtn.click();
       return;
     }
-    // No dismiss button → fall back to CSS hide.
+    // No dismiss button → fall back to CSS hide. On the beta layout the card
+    // is a role="button" nested in a wrapper; hide the outer wrapper too so
+    // the whole list row collapses (otherwise its `display: contents` parent
+    // leaves the wrapper in the flow but empty).
     card.classList.add('ljf-auto-hidden');
     card.style.setProperty('display', 'none', 'important');
+    const outer = getCardOuter(card);
+    if (outer !== card) {
+      outer.classList.add('ljf-auto-hidden');
+      outer.style.setProperty('display', 'none', 'important');
+    }
     log('no dismiss button — hiding via CSS for', label);
   }
 
@@ -1217,12 +1352,19 @@
       return;
     }
 
-    const parent = card.parentElement;
+    // On the beta layout each card sits inside a display:contents wrapper
+    // that is itself the direct child of the list root. Inserting a sibling
+    // of the card would put the panel inside that wrapper, which the beta
+    // grid layout won't display as its own row. Anchor to the outer wrapper
+    // instead — on the classic layout getCardOuter returns the card itself,
+    // so behaviour is unchanged there.
+    const outer = getCardOuter(card);
+    const parent = outer.parentElement;
     if (!parent) return;
 
     // Compute the correct insertion target: right after the card, skipping
     // any dismissal banner that may sit between card and panel.
-    let target = card.nextSibling;
+    let target = outer.nextSibling;
     while (
       target
       && target.nodeType === Node.ELEMENT_NODE
@@ -1282,14 +1424,19 @@
       if (seen.has(jobId)) { el.remove(); return; }
       seen.add(jobId);
     });
-    // Orphan pass: drop panels whose preceding sibling isn't a visible card.
+    // Orphan pass: drop panels whose preceding sibling isn't a visible card
+    // (or a wrapper around one, on the beta layout).
     document.querySelectorAll('.' + META_CLASS).forEach((el) => {
       const jobId = el.getAttribute('data-ljf-jobid');
       let prev = el.previousElementSibling;
       while (prev && prev.classList?.contains(BANNER_CLASS)) prev = prev.previousElementSibling;
-      if (!prev || !prev.matches(CARD_SELECTOR)) { el.remove(); return; }
-      if (prev.classList?.contains('ljf-auto-hidden')) { el.remove(); return; }
-      if (extractJobIdFromContainer(prev) !== jobId) el.remove();
+      if (!prev) { el.remove(); return; }
+      const prevCard = prev.matches?.(CARD_SELECTOR) ? prev : prev.querySelector?.(CARD_SELECTOR);
+      if (!prevCard) { el.remove(); return; }
+      if (prev.classList?.contains('ljf-auto-hidden') || prevCard.classList?.contains('ljf-auto-hidden')) {
+        el.remove(); return;
+      }
+      if (extractJobIdFromContainer(prevCard) !== jobId) el.remove();
     });
     // Also drop any banner whose preceding card is auto-hidden — those are
     // floating banners with no visible card above them.
@@ -1299,7 +1446,9 @@
       while (prev && (prev.classList?.contains(META_CLASS) || prev.classList?.contains(BANNER_CLASS))) {
         prev = prev.previousElementSibling;
       }
-      if (prev && prev.matches?.(CARD_SELECTOR) && prev.classList?.contains('ljf-auto-hidden')) {
+      if (!prev) return;
+      const prevCard = prev.matches?.(CARD_SELECTOR) ? prev : prev.querySelector?.(CARD_SELECTOR);
+      if (prevCard && (prev.classList?.contains('ljf-auto-hidden') || prevCard.classList?.contains('ljf-auto-hidden'))) {
         banner.remove();
       }
     });
@@ -1416,11 +1565,171 @@
     }
   }
 
+  // ---------- Client-side sort by listed date ----------
+  // Mimic LinkedIn's removed "Sort by Most Recent" by reordering cards in
+  // the list root. Sort key = Voyager `listedAt` (falling back to
+  // `originalListedAt`). Cards whose date hasn't been fetched yet sink to
+  // the bottom and re-slot on the next scan once the data arrives.
+  //
+  // The list has structure: [wrapper, hr, wrapper, hr, wrapper, ...]. We
+  // treat each (wrapper + trailing hr) as one unit so the separators stay
+  // between cards after the reorder.
+  // Prefetch state — tracks Voyager fetches kicked off by the sort feature
+  // so we can (a) hold the sort until the batch settles (avoids visible
+  // shuffle) and (b) surface progress in the results-count pill.
+  const SORT_PREFETCH_CONCURRENCY = 5;
+  const prefetchState = { requested: 0, completed: 0, activeBatches: 0 };
+
+  async function prefetchAllCardDates() {
+    if (!FILTER_SETTINGS.sortByListedDate) return;
+    const cards = pickInnermostMatches(Array.from(document.querySelectorAll(CARD_SELECTOR)));
+    const queue = [];
+    const seen = new Set();
+    for (const card of cards) {
+      const jobId = extractJobIdFromContainer(card);
+      if (!jobId || String(jobId).startsWith('beta:')) continue;
+      if (seen.has(jobId)) continue;
+      seen.add(jobId);
+      if (memCache.has(jobId) || inflight.has(jobId)) continue;
+      queue.push(jobId);
+    }
+    if (queue.length === 0) return;
+
+    prefetchState.requested += queue.length;
+    prefetchState.activeBatches++;
+    updateResultsCount();
+
+    let idx = 0;
+    const workers = Array.from({ length: Math.min(SORT_PREFETCH_CONCURRENCY, queue.length) }, () => (async () => {
+      while (alive && idx < queue.length) {
+        const jobId = queue[idx++];
+        try { await getJobInfo(jobId); } catch (_) { /* ignore individual failures */ }
+        prefetchState.completed++;
+        updateResultsCount();
+      }
+    })());
+    await Promise.all(workers);
+
+    prefetchState.activeBatches--;
+    // Once every card in this batch has a date (or gave up), we can sort.
+    sortCardsByListedDate();
+    updateResultsCount();
+  }
+
+  function sortCardsByListedDate() {
+    if (!FILTER_SETTINGS.sortByListedDate) return;
+    // Skip while a bulk prefetch is still in flight — the terminal sort
+    // fires from prefetchAllCardDates() once the batch drains, and any
+    // interim sort would just cause visible shuffle.
+    if (prefetchState.activeBatches > 0) return;
+    const root = findListRoot();
+    if (!root) return;
+
+    // Group children into per-card units. Each unit = [wrapper, ...trailing
+    // extras until the next wrapper]. "Trailing extras" includes our own
+    // meta panels and dismissal banners (which are inserted as siblings of
+    // the wrapper) and LinkedIn's <hr> separators. Keeping them all attached
+    // to the wrapper means the sort preserves card ↔ panel adjacency; if we
+    // moved just the wrappers, the panels would be left behind and the
+    // cleanup pass would delete them.
+    //
+    // Anything AFTER the last card wrapper (footer, pagination, "Are these
+    // results helpful?", job-alerts toggle) is captured as a fixed suffix
+    // that always re-appends at the end. Without this, the last card's tail
+    // ate all those elements and dragged them along whenever it moved.
+    const children = Array.from(root.children);
+    const isCardWrapper = (el) => {
+      if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+      if (el.tagName === 'HR') return false;
+      if (el.classList?.contains(META_CLASS) || el.classList?.contains(BANNER_CLASS)) return false;
+      // Must actually contain a job card — otherwise it's a divider / promo /
+      // whatever LinkedIn injects, and we should NOT try to sort it.
+      return !!(el.matches?.(CARD_SELECTOR) || el.querySelector?.(CARD_SELECTOR));
+    };
+    // Only recognize items that clearly "belong to" the preceding card as
+    // tail extras. Anything else is treated as a suffix (fixed non-sortable
+    // block at the end of the list).
+    const isKnownTailExtra = (el) => (
+      el?.nodeType === Node.ELEMENT_NODE
+      && (el.tagName === 'HR'
+          || el.classList?.contains(META_CLASS)
+          || el.classList?.contains(BANNER_CLASS))
+    );
+
+    let lastCardIdx = -1;
+    for (let i = children.length - 1; i >= 0; i--) {
+      if (isCardWrapper(children[i])) { lastCardIdx = i; break; }
+    }
+    if (lastCardIdx === -1) return; // no cards to sort
+
+    const units = [];
+    const trailingSuffix = [];
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      // Everything strictly after the last card is fixed suffix.
+      if (i > lastCardIdx) { trailingSuffix.push(child); continue; }
+      if (isCardWrapper(child)) {
+        units.push({ head: child, tail: [], key: 0 });
+      } else if (units.length && isKnownTailExtra(child)) {
+        units[units.length - 1].tail.push(child);
+      } else if (units.length) {
+        // Unknown mid-list block (e.g. an inline promo). Leave it pinned
+        // between the two adjacent units by attaching it to the previous
+        // unit's tail — same behaviour as before, just narrowed to elements
+        // we don't recognize as tail extras.
+        units[units.length - 1].tail.push(child);
+      } else {
+        // Orphan leading extra (nothing to attach to yet).
+        units.push({ head: null, tail: [child], key: 0 });
+      }
+    }
+
+    for (const u of units) {
+      if (!u.head) continue;
+      const card = u.head.matches?.(CARD_SELECTOR) ? u.head : u.head.querySelector?.(CARD_SELECTOR);
+      if (!card) continue;
+      const jobId = extractJobIdFromContainer(card);
+      if (!jobId || String(jobId).startsWith('beta:')) continue;
+      const cached = memCache.get(jobId);
+      u.key = (cached?.listedAt || cached?.originalListedAt || 0);
+    }
+
+    const indexed = units.map((u, i) => ({ u, i }));
+    // Newest first (higher timestamp wins). Stable within ties by original i.
+    indexed.sort((a, b) => (b.u.key - a.u.key) || (a.i - b.i));
+
+    const orderChanged = indexed.some((entry, idx) => entry.i !== idx);
+    if (!orderChanged) return;
+
+    // Suspend the MutationObserver while we shuffle children — otherwise
+    // our own writes echo back through scheduleScan → renderCardMeta →
+    // more DOM churn, which is what caused the right-hand detail panel to
+    // keep jumping.
+    try { mo.disconnect(); } catch (_) { /* pre-init call, no-op */ }
+    const frag = document.createDocumentFragment();
+    for (const { u } of indexed) {
+      if (u.head) frag.appendChild(u.head);
+      for (const t of u.tail) frag.appendChild(t);
+    }
+    // Footer / pagination / job-alerts toggle always stay at the end.
+    for (const s of trailingSuffix) frag.appendChild(s);
+    root.appendChild(frag);
+    // Reattach after the current microtask so we skip records generated by
+    // our own writes above.
+    queueMicrotask(() => {
+      try { mo.observe(document.body, { subtree: true, childList: true, characterData: true }); }
+      catch (_) { /* pre-init call, no-op */ }
+    });
+    log('sorted', indexed.length, 'cards by listedAt');
+  }
+
   // ---------- Results count display ----------
   // Locate LinkedIn's "<N> results" text and append our own count of
   // post-filter visible cards. Updated after every scan.
   function findResultsCountTextNode() {
-    const re = /\b\d+(?:[, ]\d{3})*\s*results?\b/i;
+    // LinkedIn now caps the visible count at "99+ results" on the beta
+    // layout, so the optional trailing '+' has to be part of the match.
+    const re = /\b\d+(?:[, ]\d{3})*\+?\s*results?\b/i;
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
       acceptNode(n) {
         if (!n.nodeValue || n.nodeValue.length > 100) return NodeFilter.FILTER_REJECT;
@@ -1460,6 +1769,18 @@
       counter.className = 'ljf-results-count';
       target.appendChild(counter);
     }
+
+    // Sort-prefetch progress takes precedence — while dates are streaming
+    // in, the visible count is meaningless (cards are still shuffling).
+    const remaining = prefetchState.requested - prefetchState.completed;
+    if (prefetchState.activeBatches > 0 && remaining > 0) {
+      counter.textContent = ` · sorting ${remaining} more…`;
+      counter.title = 'Prefetching job dates so the sort settles';
+      counter.classList.add('ljf-results-count-loading');
+      return;
+    }
+    counter.classList.remove('ljf-results-count-loading');
+
     if (hidden === 0) {
       counter.textContent = ` · ${visible} visible`;
       counter.title = `All ${total} cards visible (no filters matched)`;
@@ -1489,6 +1810,14 @@
       scanForEngaged();
       // Backup: brute-force pass for cards that didn't match CARD_SELECTOR
       bruteForceAutoDismissScan();
+      // Kick off a bulk prefetch of Voyager dates for any card we haven't
+      // fetched yet. Fire-and-forget: it drains asynchronously and calls
+      // sortCardsByListedDate() once the batch settles. Only runs when the
+      // sort setting is on (function short-circuits otherwise).
+      prefetchAllCardDates();
+      // Client-side sort (no-op when the setting is off, when a prefetch is
+      // still in flight, or when the order already matches).
+      sortCardsByListedDate();
       // Update the visible-card counter next to LinkedIn's results count
       updateResultsCount();
     });
@@ -1498,7 +1827,7 @@
   // engagement/duplicate state will fill in once the caches finish loading
   // and the next scheduled scan (via MO, periodic, or below) runs.
   scheduleScan();
-  Promise.all([loadEngagedCache(), loadDupGroups(), loadAutoDismissRules(), loadFilterSettings()])
+  Promise.all([loadEngagedCache(), loadDupGroups(), loadAutoDismissRules(), loadFilterSettings(), loadSheetsSync()])
     .then(() => scheduleScan());
 
   // Late-loading content (LinkedIn hydrates cards asynchronously). Run a few

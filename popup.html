@@ -160,6 +160,18 @@
   <div class="hint">Matching is fuzzy: "DataAnnotation" also matches "Data Annotation" and "Data-Annotation". Toggle off to disable a rule without deleting it.</div>
 
   <div class="section">
+    <h2>Sort</h2>
+    <p class="sub">LinkedIn removed the "Sort by Most Recent" control. Turn this on to reorder the visible cards yourself.</p>
+    <label class="filter-row">
+      <input type="checkbox" id="sort-by-listed-date">
+      <span class="filter-row-label">
+        Sort by most recent (client-side)
+        <span class="ex">Uses LinkedIn's listed date. Cards still loading temporarily sink to the bottom.</span>
+      </span>
+    </label>
+  </div>
+
+  <div class="section">
     <h2>Hide duplicates</h2>
     <p class="sub">Filter cards detected as duplicates of jobs you've seen before.</p>
     <label class="filter-row">
@@ -176,6 +188,23 @@
         <span class="ex">e.g. "📍 Also at: Washington DC, Remote"</span>
       </span>
     </label>
+  </div>
+
+  <div class="section">
+    <h2>Sync to Google Sheet</h2>
+    <p class="sub">Log each Applied / Dismissed / Viewed / Auto-hidden event to a sheet via an Apps Script webhook.</p>
+    <label class="filter-row">
+      <input type="checkbox" id="sheets-sync-enabled">
+      <span class="filter-row-label">
+        Enable sync
+        <span class="ex">Fire-and-forget: sync failures never affect the extension.</span>
+      </span>
+    </label>
+    <div class="add-form" style="margin-top:6px">
+      <input type="text" id="sheets-webhook-url" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off">
+      <button type="button" id="sheets-test-btn">Test</button>
+    </div>
+    <div class="hint" id="sheets-sync-status" style="min-height:14px">&nbsp;</div>
   </div>
 
   <div class="section">

@@ -1,5 +1,6 @@
 const STORAGE_KEY = 'autodismiss_rules';
 const FILTERS_KEY = 'filter_settings';
+const SHEETS_SYNC_KEY = 'sheets_sync';
 
 const DEFAULT_RULES = [
   { id: 'data-annotation', companyName: 'DataAnnotation', enabled: true, builtIn: true },
@@ -7,8 +8,9 @@ const DEFAULT_RULES = [
 ];
 
 const DEFAULT_FILTERS = {
-  hideDupCancelled: false,
-  hideDupLoc:       false,
+  hideDupCancelled:  false,
+  hideDupLoc:        false,
+  sortByListedDate:  false,
 };
 
 function loadFilters() {
@@ -161,12 +163,14 @@ document.getElementById('apply-btn').addEventListener('click', async () => {
   }
 });
 
-// Wire up duplicate-filter checkboxes
+// Wire up duplicate-filter + sort checkboxes
 loadFilters().then((filters) => {
   const cancelled = document.getElementById('hide-dup-cancelled');
   const loc       = document.getElementById('hide-dup-loc');
+  const sortBy    = document.getElementById('sort-by-listed-date');
   cancelled.checked = !!filters.hideDupCancelled;
   loc.checked       = !!filters.hideDupLoc;
+  sortBy.checked    = !!filters.sortByListedDate;
   cancelled.addEventListener('change', async () => {
     filters.hideDupCancelled = cancelled.checked;
     await saveFilters(filters);
@@ -174,5 +178,83 @@ loadFilters().then((filters) => {
   loc.addEventListener('change', async () => {
     filters.hideDupLoc = loc.checked;
     await saveFilters(filters);
+  });
+  sortBy.addEventListener('change', async () => {
+    filters.sortByListedDate = sortBy.checked;
+    await saveFilters(filters);
+  });
+});
+
+// Google Sheets sync settings
+function loadSheetsSync() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([SHEETS_SYNC_KEY], (out) => {
+      resolve({ enabled: false, webhookUrl: '', ...(out[SHEETS_SYNC_KEY] || {}) });
+    });
+  });
+}
+function saveSheetsSync(cfg) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ [SHEETS_SYNC_KEY]: cfg }, resolve);
+  });
+}
+
+loadSheetsSync().then((cfg) => {
+  const enabled = document.getElementById('sheets-sync-enabled');
+  const url     = document.getElementById('sheets-webhook-url');
+  const testBtn = document.getElementById('sheets-test-btn');
+  const status  = document.getElementById('sheets-sync-status');
+  enabled.checked = !!cfg.enabled;
+  url.value       = cfg.webhookUrl || '';
+
+  const flash = (msg, ok) => {
+    status.textContent = msg;
+    status.style.color = ok === false ? '#cf222e' : (ok === true ? '#2e7d32' : '#888');
+  };
+
+  const isValidWebhookUrl = (s) => /^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec\b/.test(String(s || '').trim());
+
+  const persist = async () => {
+    const trimmed = url.value.trim();
+    if (trimmed && !isValidWebhookUrl(trimmed)) {
+      flash('URL should look like https://script.google.com/macros/s/…/exec', false);
+      return;
+    }
+    cfg.enabled    = enabled.checked;
+    cfg.webhookUrl = trimmed;
+    await saveSheetsSync(cfg);
+    flash(cfg.enabled ? 'Sync on' : 'Sync off', cfg.enabled);
+  };
+
+  enabled.addEventListener('change', persist);
+  url.addEventListener('change', persist);
+  url.addEventListener('blur', persist);
+
+  testBtn.addEventListener('click', async () => {
+    const target = url.value.trim();
+    if (!isValidWebhookUrl(target)) { flash('Enter a valid /exec URL first', false); return; }
+    flash('Sending test row…');
+    try {
+      // Note: with 'text/plain' the request avoids a CORS preflight, so we
+      // can actually read the response. Apps Script returns JSON.
+      const res = await fetch(target, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          timestamp: new Date().toISOString(),
+          action: 'test',
+          jobId: 'test-' + Date.now(),
+          title: 'Test event from extension popup',
+          company: 'LinkedIn Job Filter',
+          location: '',
+          url: '',
+        }),
+        credentials: 'omit',
+      });
+      if (res.ok) flash('Test row sent ✓', true);
+      else flash('Sheet responded ' + res.status, false);
+    } catch (e) {
+      flash('Network error — check the URL and deployment access', false);
+    }
   });
 });
