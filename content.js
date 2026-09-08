@@ -1206,13 +1206,14 @@
         pills.push({ type, text });
       }
 
-      // Applicant-count pill (from Voyager's `applies` field).
+      // Applicant-count pill (from Voyager's `applies` field). Show the
+      // raw number Voyager returns — LinkedIn's UI caps at "100+ people
+      // clicked apply", but Voyager often reports the actual count past
+      // that cap. Thousands separator for readability on high-applicant
+      // roles ("1,247 applicants" not "1247 applicants").
       if (typeof info.applies === 'number' && info.applies > 0) {
         const n = info.applies;
-        let label;
-        if (n === 1) label = '1 applicant';
-        else if (n >= 100) label = '100+ applicants';
-        else label = `${n} applicants`;
+        const label = n === 1 ? '1 applicant' : `${n.toLocaleString()} applicants`;
         pills.push({ type: 'applicants', text: `👥 ${label}` });
       }
     }
